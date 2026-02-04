@@ -1,10 +1,10 @@
-numpy<1.23.0
+numpy
 einops
 mujoco_py>=2.0
 gym>=0.13,<0.24
 dm_control>=1.0.3,<=1.0.20
 cython==3.0.0a10
-numba<0.60.0
+numba
 matplotlib<=3.7.5
 six
 hydra-core
@@ -18,6 +18,6 @@ shapely<2.0.0
 scikit-image<0.23.0
 opencv-python
 imagecodecs
-torch>1.0.0,<2.3.0
+torch>1.0.0
 torchvision
 mujoco<=3.1.6
