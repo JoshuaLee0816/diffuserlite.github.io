@@ -21,8 +21,9 @@ from pathlib import Path
 REPO_ID = "JoshuaLee0816/diffuserlite-results"
 ENV_NAME = "halfcheetah-medium-expert-v2"
 DEVICE = "cpu"  # 本機端用 CPU
-NUM_ENVS = 5    # 減少環境數量加速測試
+NUM_ENVS = 1    # 錄影時只用 1 個環境
 NUM_EPISODES = 1  # 減少 episode 數量加速測試
+RECORD_VIDEO = True  # 是否錄影
 
 
 def download_checkpoints():
@@ -79,6 +80,14 @@ def setup_mujoco_shim():
     class ShimModel:
         def __init__(self, m):
             self._m = m
+            # 建立 camera name -> id 映射
+            self._camera_name2id = {}
+            for i in range(m.ncam):
+                name = mujoco.mj_id2name(m, mujoco.mjtObj.mjOBJ_CAMERA, i)
+                if name:
+                    self._camera_name2id[name] = i
+        def camera_name2id(self, name):
+            return self._camera_name2id.get(name, -1)
         @property
         def actuator_ctrlrange(self):
             return self._m.actuator_ctrlrange.copy()
@@ -117,6 +126,8 @@ def setup_mujoco_shim():
             mujoco.mj_step(self._m, self._d)
         def forward(self):
             mujoco.mj_forward(self._m, self._d)
+        def reset(self):
+            mujoco.mj_resetData(self._m, self._d)
         def get_state(self):
             return type('S',(),{'time':self._d.time,'qpos':self._d.qpos.copy(),'qvel':self._d.qvel.copy(),'act':np.array([]),'udd_state':{}})()
         def set_state(self, s):
@@ -129,10 +140,39 @@ def setup_mujoco_shim():
         def __init__(self, sim): pass
         def render(self): pass
 
+    class MjRenderContextOffscreen:
+        def __init__(self, sim, device_id=-1):
+            self._sim = sim
+            self._m = sim._m
+            self._d = sim._d
+            self._width = 640
+            self._height = 480
+            self._renderer = mujoco.Renderer(self._m, height=self._height, width=self._width)
+            # 建立 camera 物件
+            self.cam = mujoco.MjvCamera()
+            mujoco.mjv_defaultCamera(self.cam)
+        def render(self, width, height, camera_id=None):
+            mujoco.mj_forward(self._m, self._d)
+            if camera_id is not None and camera_id >= 0:
+                self._renderer.update_scene(self._d, camera=camera_id)
+            else:
+                self._renderer.update_scene(self._d, camera=self.cam)
+            return self._renderer.render()
+        def read_pixels(self, width, height, depth=False):
+            img = self.render(width, height)
+            if depth:
+                return img, np.zeros((height, width), dtype=np.float32)
+            return img
+
+    from collections import namedtuple
+    MjSimState = namedtuple('MjSimState', ['time', 'qpos', 'qvel', 'act', 'udd_state'])
+
     shim.load_model_from_path = lambda p: ShimModel(mujoco.MjModel.from_xml_path(p))
     shim.MjSim = lambda m: ShimSim(m)
     shim.MjViewer = MjViewer
+    shim.MjRenderContextOffscreen = MjRenderContextOffscreen
     shim.MujocoException = Exception
+    shim.MjSimState = MjSimState
     shim.ignore_mujoco_warnings = type('ctx',(),{'__enter__':lambda s:None,'__exit__':lambda s,*a:None})
     shim.__path__ = []
 
@@ -149,6 +189,7 @@ def run_inference(checkpoint_dir: Path):
     import numpy as np
     import gym
     import d4rl
+    import mujoco
 
     from cleandiffuser.dataset.d4rl_mujoco_dataset import MultiHorizonD4RLMuJoCoDataset
     from cleandiffuser.diffusion import ContinuousRectifiedFlow
@@ -241,7 +282,12 @@ def run_inference(checkpoint_dir: Path):
     target_return = 1.0  # R1 的 target_return（已正規化）
     w_cfg = 1.2  # R1 的 w_cfg
 
-    env_eval = gym.vector.make(ENV_NAME, NUM_ENVS)
+    # 錄影設定
+    frames = []
+    if RECORD_VIDEO:
+        print("錄影模式：啟用")
+
+    env_eval = gym.vector.make(ENV_NAME, NUM_ENVS, asynchronous=False)
     episode_rewards = []
 
     priors = [torch.zeros((NUM_ENVS, planning_horizons[i], obs_dim), device=DEVICE)
@@ -275,6 +321,20 @@ def run_inference(checkpoint_dir: Path):
 
             obs, rew, done, info = env_eval.step(act)
 
+            # 錄影：擷取畫面（使用 env_eval 內部環境）
+            if RECORD_VIDEO:
+                try:
+                    # 取得 vector env 中第一個環境的渲染
+                    inner_env = env_eval.envs[0]
+                    frame = inner_env.render(mode='rgb_array')
+                    if frame is not None:
+                        # 修正上下顛倒
+                        frame = np.flipud(frame)
+                        frames.append(frame)
+                except Exception as e:
+                    if t == 1:
+                        print(f"  錄影失敗: {e}")
+
             t += 1
             if cum_done is None:
                 cum_done = done
@@ -306,6 +366,14 @@ def run_inference(checkpoint_dir: Path):
     print(f"Normalized Score: {mean_score:.2f} +/- {std_score:.2f}")
     print(f"論文 R1 結果: 91.9")
     print(f"{'='*50}")
+
+    # 儲存影片
+    if RECORD_VIDEO and len(frames) > 0:
+        import imageio
+        video_path = Path(__file__).parent / "inference_video.mp4"
+        print(f"\n儲存影片到: {video_path}")
+        imageio.mimsave(str(video_path), frames, fps=30)
+        print(f"影片儲存完成！共 {len(frames)} 幀")
 
     return {
         'env_name': ENV_NAME,

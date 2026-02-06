@@ -50,3 +50,9 @@ ENV/
 # Logs
 *.log
 logs/
+
+# Videos
+*.mp4
+*.avi
+*.mov
+inference_video.*
