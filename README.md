@@ -99,15 +99,26 @@ python inference_local.py
 
 | Environment | Paper (R1) | My Result | 差異 |
 |-------------|------------|-----------|------|
-| halfcheetah-medium-expert-v2 | 91.9 | **TBD** | - |
+| halfcheetah-medium-expert-v2 | 91.9 | **93.5** | +1.6 |
 
-### 學習曲線
-執行 `inference_local.py` 後，可在 `results/figures/` 查看：
+### 學習曲線 (Normalized Score)
 
-| 圖表 | 說明 |
-|------|------|
-| `learning_progress.mp4` | 各訓練步數的 agent 行為影片 |
-| `inference_results.json` | 各步數的 normalized score |
+| Step | Score | Step | Score |
+|------|-------|------|-------|
+| 1,000 | -1.6 | 46,000 | 88.0 |
+| 6,000 | -1.3 | 51,000 | 89.5 |
+| 11,000 | -0.5 | 56,000 | 90.3 |
+| 16,000 | -0.4 | 61,000 | 91.9 |
+| 21,000 | 1.5 | 66,000 | 89.7 |
+| 26,000 | 15.9 | 71,000 | **93.5** |
+| 31,000 | 76.8 | 76,000 | 91.8 |
+| 36,000 | 32.2 | 81,000 | 91.6 |
+| 41,000 | 78.0 | 86,000 | 92.8 |
+
+- 最佳分數：**93.5** @ step 71,000
+- 約 30,000 步後開始收斂到 ~90 分
+- 詳細數據：`learning_curve_results.json`
+- 學習過程影片：`learning_progress.mp4`
 
 ---
 
