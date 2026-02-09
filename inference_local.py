@@ -5,12 +5,14 @@
 輸出結果表格和合併影片
 
 使用方式：
-    python inference_local.py
+    python inference_local.py                           # 預設 halfcheetah
+    python inference_local.py --env walker2d-medium-expert-v2
+    python inference_local.py --env hopper-medium-expert-v2
+    python inference_local.py --skip-download           # 跳過下載
 
 需要先安裝環境：
     pip install -e .
     pip install huggingface_hub imageio[ffmpeg]
-    # MuJoCo 和 D4RL 的安裝請參考 README
 """
 
 import os
@@ -21,37 +23,40 @@ from pathlib import Path
 
 # ========== 設定 ==========
 REPO_ID = "JoshuaLee0816/diffuserlite-results"
-ENV_NAME = "halfcheetah-medium-expert-v2"
-DEVICE = "cpu"  # 本機端用 CPU
-NUM_ENVS = 1    # 錄影時只用 1 個環境
-NUM_EPISODES = 1  # 每個 checkpoint 跑 1 個 episode
-RECORD_VIDEO = True  # 是否錄影
-MAX_STEPS_PER_VIDEO = 200  # 每個 checkpoint 錄製的最大步數（避免影片太長）
+DEVICE = "cpu"
+NUM_ENVS = 1
+NUM_EPISODES = 1
+RECORD_VIDEO = True
+MAX_STEPS_PER_VIDEO = 200
 
 
-def download_all_checkpoints():
-    """從 Hugging Face 下載所有 checkpoint（包含帶步數的）"""
+def get_output_dir(env_name):
+    """取得輸出目錄（依環境分類）"""
+    output_dir = Path(__file__).parent / "results" / "inference" / env_name
+    output_dir.mkdir(parents=True, exist_ok=True)
+    return output_dir
+
+
+def download_all_checkpoints(env_name):
+    """從 Hugging Face 下載所有 checkpoint"""
     from huggingface_hub import hf_hub_download, list_repo_files
     import shutil
 
-    local_dir = Path(__file__).parent / "checkpoints" / ENV_NAME
+    local_dir = Path(__file__).parent / "checkpoints" / env_name
     local_dir.mkdir(parents=True, exist_ok=True)
 
-    print(f"從 Hugging Face 下載所有 checkpoint...")
+    print(f"從 Hugging Face 下載 checkpoint...")
     print(f"Repo: {REPO_ID}")
+    print(f"環境: {env_name}")
     print(f"目標目錄: {local_dir}")
 
     try:
         files = list_repo_files(REPO_ID)
-        # 下載所有 checkpoint（包含帶步數的）
-        # 支援兩種路徑：根目錄或 diffuserlite_d4rl_mujoco/halfcheetah-medium-expert-v2/ 子目錄
-        checkpoint_files = [f for f in files if f.endswith('.pt') and (
-            ENV_NAME in f or  # 在子目錄中
-            f.startswith('diffusion') or f.startswith('invdyn')  # 直接在根目錄
-        )]
+        # 下載該環境的 checkpoint
+        checkpoint_files = [f for f in files if f.endswith('.pt') and env_name in f]
 
         if not checkpoint_files:
-            print(f"Hugging Face 上沒有找到 {ENV_NAME} 的 checkpoint")
+            print(f"Hugging Face 上沒有找到 {env_name} 的 checkpoint")
             return None, []
 
         print(f"找到 {len(checkpoint_files)} 個 checkpoint 檔案")
@@ -71,7 +76,6 @@ def download_all_checkpoints():
             if match:
                 steps.add(int(match.group(1)))
 
-        # 檢查 latest
         if (local_dir / 'diffusion0_ckpt_latest.pt').exists():
             steps.add('latest')
 
@@ -86,7 +90,7 @@ def download_all_checkpoints():
 
 
 def setup_mujoco_shim():
-    """設定 mujoco_py shim（相容層）"""
+    """設定 mujoco_py shim"""
     import types
     import mujoco
     import numpy as np
@@ -165,15 +169,13 @@ def setup_mujoco_shim():
             self._renderer = mujoco.Renderer(self._m, height=self._height, width=self._width)
             self.cam = mujoco.MjvCamera()
             mujoco.mjv_defaultCamera(self.cam)
-            # 設定相機初始參數（側視角）
             self.cam.distance = 6.0
             self.cam.elevation = -20
             self.cam.azimuth = 90
         def render(self, width, height, camera_id=None):
             mujoco.mj_forward(self._m, self._d)
-            # 讓相機跟隨物體（x 位置）
             if len(self._d.qpos) > 0:
-                self.cam.lookat[0] = self._d.qpos[0]  # 跟隨 x 位置
+                self.cam.lookat[0] = self._d.qpos[0]
                 self.cam.lookat[1] = 0
                 self.cam.lookat[2] = 0.5
             if camera_id is not None and camera_id >= 0:
@@ -206,14 +208,13 @@ def setup_mujoco_shim():
     print("mujoco_py shim 已設定")
 
 
-def run_inference_single(checkpoint_dir: Path, step, env, dataset, normalizer,
+def run_inference_single(checkpoint_dir, step, env_name, env, dataset, normalizer,
                          diffusions, invdyn, obs_dim, planning_horizons, n_levels):
     """對單一 checkpoint 執行推論"""
     import torch
     import numpy as np
     import gym
 
-    # 載入 checkpoint
     step_str = step if step == 'latest' else str(step)
 
     for i in range(n_levels):
@@ -229,12 +230,11 @@ def run_inference_single(checkpoint_dir: Path, step, env, dataset, normalizer,
     invdyn.load(str(invdyn_path))
     invdyn.eval()
 
-    # Inference 設定
     target_return = 1.0
     w_cfg = 1.2
     frames = []
 
-    env_eval = gym.vector.make(ENV_NAME, NUM_ENVS, asynchronous=False)
+    env_eval = gym.vector.make(env_name, NUM_ENVS, asynchronous=False)
 
     priors = [torch.zeros((NUM_ENVS, planning_horizons[i], obs_dim), device=DEVICE)
               for i in range(n_levels)]
@@ -267,16 +267,13 @@ def run_inference_single(checkpoint_dir: Path, step, env, dataset, normalizer,
 
         obs, rew, done, info = env_eval.step(act)
 
-        # 錄影（只錄前 MAX_STEPS_PER_VIDEO 步）
         if RECORD_VIDEO and t < MAX_STEPS_PER_VIDEO:
             try:
                 inner_env = env_eval.envs[0]
                 unwrapped = inner_env.unwrapped if hasattr(inner_env, 'unwrapped') else inner_env
 
-                # 取得獵豹的 x 位置並讓相機跟隨
                 if hasattr(unwrapped, 'sim') and hasattr(unwrapped.sim, 'data'):
                     x_pos = unwrapped.sim.data.qpos[0]
-                    # 設定 offscreen render context 的相機位置
                     if hasattr(unwrapped, '_get_viewer'):
                         viewer = unwrapped._get_viewer('rgb_array')
                         if viewer is not None and hasattr(viewer, 'cam'):
@@ -294,7 +291,6 @@ def run_inference_single(checkpoint_dir: Path, step, env, dataset, normalizer,
             except Exception as e:
                 if t == 0:
                     print(f"  錄影設定: {e}")
-                # 嘗試基本渲染
                 try:
                     frame = inner_env.render(mode='rgb_array')
                     if frame is not None:
@@ -316,7 +312,6 @@ def run_inference_single(checkpoint_dir: Path, step, env, dataset, normalizer,
 
     env_eval.close()
 
-    # 計算 Normalized Score
     normalized_score = env.get_normalized_score(ep_reward[0]) * 100
 
     return normalized_score, frames
@@ -329,17 +324,14 @@ def add_text_to_frame(frame, text, position=(10, 30)):
         from PIL import Image, ImageDraw, ImageFont
         img = Image.fromarray(frame)
         draw = ImageDraw.Draw(img)
-        # 嘗試使用系統字體
         try:
             font = ImageFont.truetype("/System/Library/Fonts/Helvetica.ttc", 24)
         except:
             font = ImageFont.load_default()
-        # 加上黑色背景讓文字更清楚
         draw.rectangle([position[0]-5, position[1]-5, position[0]+200, position[1]+30], fill='black')
         draw.text(position, text, font=font, fill='white')
         return np.array(img)
     except ImportError:
-        # 如果沒有 PIL，直接返回原 frame
         return frame
 
 
@@ -347,13 +339,23 @@ def main():
     import json
 
     parser = argparse.ArgumentParser(description='本機端 Inference - 測試所有 checkpoint')
+    parser.add_argument('--env', type=str, default='halfcheetah-medium-expert-v2',
+                        choices=['halfcheetah-medium-expert-v2', 'walker2d-medium-expert-v2', 'hopper-medium-expert-v2'],
+                        help='環境名稱')
     parser.add_argument('--skip-download', action='store_true', help='跳過下載，使用本地 checkpoint')
     args = parser.parse_args()
 
-    # 設定 mujoco_py shim（必須在 import d4rl 之前）
+    env_name = args.env
+    output_dir = get_output_dir(env_name)
+
+    print(f"\n{'='*60}")
+    print(f"DiffuserLite Inference")
+    print(f"環境: {env_name}")
+    print(f"輸出目錄: {output_dir}")
+    print(f"{'='*60}\n")
+
     setup_mujoco_shim()
 
-    # 現在才能安全 import d4rl
     import torch
     import numpy as np
     import gym
@@ -368,18 +370,18 @@ def main():
 
     # 下載 checkpoint
     if args.skip_download:
-        checkpoint_dir = Path(__file__).parent / "checkpoints" / ENV_NAME
-        # 找出所有可用的步數
+        checkpoint_dir = Path(__file__).parent / "checkpoints" / env_name
         steps = set()
-        for f in os.listdir(checkpoint_dir):
-            match = re.search(r'_ckpt_(\d+)\.pt', f)
-            if match:
-                steps.add(int(match.group(1)))
-        if (checkpoint_dir / 'diffusion0_ckpt_latest.pt').exists():
-            steps.add('latest')
+        if checkpoint_dir.exists():
+            for f in os.listdir(checkpoint_dir):
+                match = re.search(r'_ckpt_(\d+)\.pt', f)
+                if match:
+                    steps.add(int(match.group(1)))
+            if (checkpoint_dir / 'diffusion0_ckpt_latest.pt').exists():
+                steps.add('latest')
         steps = sorted([s for s in steps if isinstance(s, int)]) + (['latest'] if 'latest' in steps else [])
     else:
-        checkpoint_dir, steps = download_all_checkpoints()
+        checkpoint_dir, steps = download_all_checkpoints(env_name)
 
     if checkpoint_dir is None or not checkpoint_dir.exists():
         print("無法找到 checkpoint")
@@ -389,15 +391,13 @@ def main():
         print("沒有找到任何 checkpoint")
         sys.exit(1)
 
-    # 只保留數字步數（排除 latest）用於測試學習曲線
     numeric_steps = [s for s in steps if isinstance(s, int)]
     print(f"\n將測試的 checkpoint 步數: {numeric_steps}")
 
     set_seed(42)
 
-    # 環境設定
-    env = gym.make(ENV_NAME)
-    scale = DD_RETURN_SCALE[ENV_NAME]
+    env = gym.make(env_name)
+    scale = DD_RETURN_SCALE[env_name]
 
     dataset = MultiHorizonD4RLMuJoCoDataset(
         env.get_dataset(),
@@ -408,7 +408,6 @@ def main():
     obs_dim, act_dim = dataset.o_dim, dataset.a_dim
     normalizer = dataset.get_normalizer()
 
-    # 模型設定
     planning_horizons = [5, 5, 9]
     n_levels = len(planning_horizons)
 
@@ -437,7 +436,7 @@ def main():
 
     invdyn = FancyMlpInvDynamic(obs_dim, act_dim, 256, torch.nn.Tanh(), add_dropout=True, device=DEVICE)
 
-    # 執行每個 checkpoint 的推論
+    # 執行推論
     results = []
     all_frames = []
 
@@ -448,7 +447,7 @@ def main():
     for step in numeric_steps:
         print(f"測試 step {step}...")
         score, frames = run_inference_single(
-            checkpoint_dir, step, env, dataset, normalizer,
+            checkpoint_dir, step, env_name, env, dataset, normalizer,
             diffusions, invdyn, obs_dim, planning_horizons, n_levels
         )
 
@@ -456,7 +455,6 @@ def main():
             results.append({'step': step, 'score': score})
             print(f"  Step {step}: Score = {score:.2f}")
 
-            # 加上步數標籤到每個 frame
             if frames:
                 labeled_frames = [add_text_to_frame(f, f"Step: {step}") for f in frames]
                 all_frames.extend(labeled_frames)
@@ -465,18 +463,16 @@ def main():
 
     # 輸出結果表格
     print(f"\n{'='*60}")
-    print(f"學習曲線結果")
+    print(f"學習曲線結果 ({env_name})")
     print(f"{'='*60}")
     print(f"{'Step':>10} | {'Normalized Score':>20}")
     print(f"{'-'*10}-+-{'-'*20}")
     for r in results:
         print(f"{r['step']:>10} | {r['score']:>20.2f}")
-    print(f"{'-'*10}-+-{'-'*20}")
-    print(f"論文 R1 結果: 91.9")
     print(f"{'='*60}")
 
-    # 儲存結果
-    results_file = Path(__file__).parent / "learning_curve_results.json"
+    # 儲存結果到環境專屬目錄
+    results_file = output_dir / "learning_curve_results.json"
     with open(results_file, 'w') as f:
         json.dump(results, f, indent=2)
     print(f"\n結果已儲存到: {results_file}")
@@ -484,13 +480,13 @@ def main():
     # 儲存合併影片
     if RECORD_VIDEO and all_frames:
         import imageio
-        video_path = Path(__file__).parent / "learning_progress.mp4"
+        video_path = output_dir / "learning_progress.mp4"
         print(f"\n儲存合併影片到: {video_path}")
         print(f"共 {len(all_frames)} 幀")
         imageio.mimsave(str(video_path), all_frames, fps=30)
         print(f"影片儲存完成！")
 
-    # 畫學習曲線圖
+    # 畫學習曲線圖（不顯示論文分數）
     try:
         import matplotlib.pyplot as plt
 
@@ -499,15 +495,13 @@ def main():
 
         plt.figure(figsize=(10, 6))
         plt.plot(steps_plot, scores_plot, 'b-o', linewidth=2, markersize=8)
-        plt.axhline(y=91.9, color='r', linestyle='--', label='論文 R1 結果 (91.9)')
         plt.xlabel('Training Steps', fontsize=12)
         plt.ylabel('Normalized Score', fontsize=12)
-        plt.title('DiffuserLite Learning Curve (HalfCheetah-medium-expert-v2)', fontsize=14)
-        plt.legend()
+        plt.title(f'DiffuserLite Learning Curve ({env_name})', fontsize=14)
         plt.grid(True, alpha=0.3)
         plt.tight_layout()
 
-        fig_path = Path(__file__).parent / "learning_curve.png"
+        fig_path = output_dir / "learning_curve.png"
         plt.savefig(fig_path, dpi=150)
         print(f"學習曲線圖已儲存到: {fig_path}")
         plt.close()
